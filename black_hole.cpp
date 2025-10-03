@@ -27,6 +27,9 @@ double c = 299792458.0;
 double G = 6.67430e-11;
 struct Ray;
 bool Gravity = false;
+bool gridDirty = true;
+bool cameraUBODirty = true;
+bool objectsUBODirty = true;
 
 struct Camera {
     // Center the camera orbit on the black hole at (0, 0, 0)
@@ -61,6 +64,8 @@ struct Camera {
         target = vec3(0.0f, 0.0f, 0.0f);
         if(dragging | panning) {
             moving = true;
+            gridDirty = true;
+            cameraUBODirty = true;
         } else {
             moving = false;
         }
@@ -479,9 +484,15 @@ struct Engine {
 
         // 2) bind compute program & UBOs
         glUseProgram(computeProgram);
-        uploadCameraUBO(cam);
-        uploadDiskUBO();
-        uploadObjectsUBO(objects);
+        if (cameraUBODirty) {
+            uploadCameraUBO(cam);
+            cameraUBODirty = false;
+        }
+        uploadDiskUBO(); // Se o disco não muda, pode deixar assim
+        if (objectsUBODirty) {
+            uploadObjectsUBO(objects);
+            objectsUBODirty = false;
+        }
 
         // 3) bind it as image unit 0
         glBindImageTexture(0, texture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
@@ -657,37 +668,40 @@ int main() {
         // Gravity
         for (auto& obj : objects) {
             for (auto& obj2 : objects) {
-                if (&obj == &obj2) continue; // skip self-interaction
-                 float dx  = obj2.posRadius.x - obj.posRadius.x;
-                 float dy = obj2.posRadius.y - obj.posRadius.y;
-                 float dz = obj2.posRadius.z - obj.posRadius.z;
-                 float distance = sqrt(dx * dx + dy * dy + dz * dz);
-                 if (distance > 0) {
-                        vector<double> direction = {dx / distance, dy / distance, dz / distance};
-                        //distance *= 1000;
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
+                if (&obj == &obj2) continue;
+                float dx = obj2.posRadius.x - obj.posRadius.x;
+                float dy = obj2.posRadius.y - obj.posRadius.y;
+                float dz = obj2.posRadius.z - obj.posRadius.z;
+                float distanceSquared = dx * dx + dy * dy + dz * dz;
+                if (distanceSquared > 0.0f) {
+                    float distance = sqrt(distanceSquared);
+                    float invDistance = 1.0f / distance;
+                    double Gforce = (G * obj.mass * obj2.mass) / distanceSquared;
+                    double acc1 = Gforce / obj.mass;
+                    std::vector<double> acc = { dx * invDistance * acc1, dy * invDistance * acc1, dz * invDistance * acc1 };
+                    if (Gravity) {
+                        obj.velocity.x += acc[0];
+                        obj.velocity.y += acc[1];
+                        obj.velocity.z += acc[2];
 
-                        double acc1 = Gforce / obj.mass;
-                        std::vector<double> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
-                        if (Gravity) {
-                            obj.velocity.x += acc[0];
-                            obj.velocity.y += acc[1];
-                            obj.velocity.z += acc[2];
+                        obj.posRadius.x += obj.velocity.x;
+                        obj.posRadius.y += obj.velocity.y;
+                        obj.posRadius.z += obj.velocity.z;
 
-                            obj.posRadius.x += obj.velocity.x;
-                            obj.posRadius.y += obj.velocity.y;
-                            obj.posRadius.z += obj.velocity.z;
-                            cout << "velocity: " <<obj.velocity.x<<", " <<obj.velocity.y<<", " <<obj.velocity.z<<endl;
-                        }
+                        gridDirty = true;
+                        objectsUBODirty = true;
+                        // Remova o cout para performance!
                     }
-            }
         }
 
 
 
         // ---------- GRID ------------- //
         // 2) rebuild grid mesh on CPU
-        engine.generateGrid(objects);
+        if (gridDirty) {
+            engine.generateGrid(objects);
+            gridDirty = false;
+        }
         // 5) overlay the bent grid
         mat4 view = lookAt(camera.position(), camera.target, vec3(0,1,0));
         mat4 proj = perspective(radians(60.0f), float(engine.COMPUTE_WIDTH)/engine.COMPUTE_HEIGHT, 1e9f, 1e14f);
